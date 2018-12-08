@@ -10,9 +10,13 @@
 
 const char STR_EXIT[] = "\x48\xC7\xC0\x3C\x00\x00\x00\x0F\x05";
 
-int main()
+int main(int argc, char *argv[])
 {
-	int fd = open("a.out", O_RDWR);
+	if (argc != 2) {
+		fprintf(stderr, "wrong args\n");
+		return 0;
+	}
+	int fd = open(argv[1], O_RDWR);
 	if (fd == -1) {
 		perror("open");
 		return 0;
